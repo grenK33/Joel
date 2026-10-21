@@ -197,6 +197,37 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   }
 });
 
+// API endpoint: short-lived Live API token (same contract as api/live-token.ts on Vercel)
+app.post('/api/live-token', async (_req: Request, res: Response) => {
+  if (!apiKey) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY is missing on server.' });
+  }
+  try {
+    const authAi = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: 'v1alpha' } });
+    const now = Date.now();
+    const token = await authAi.authTokens.create({
+      config: {
+        uses: 1,
+        expireTime: new Date(now + 30 * 60 * 1000).toISOString(),
+        newSessionExpireTime: new Date(now + 60 * 1000).toISOString(),
+        liveConnectConstraints: {
+          model: 'gemini-3.8-live',
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Fenrir' } } },
+            systemInstruction: JOEL_SYSTEM_INSTRUCTION + '\nKeep spoken voice replies concise, warm, and articulate.',
+          },
+        },
+        httpOptions: { apiVersion: 'v1alpha' },
+      },
+    });
+    return res.json({ token: token.name, model: 'gemini-3.8-live' });
+  } catch (err: any) {
+    console.error('Failed to create live token:', err?.message || err);
+    return res.status(500).json({ error: 'Could not start a live voice session.' });
+  }
+});
+
 // API endpoint: Text-to-Speech (TTS) using gemini-3.8-flash-lite-tts
 app.post('/api/tts', async (req: Request, res: Response) => {
   try {

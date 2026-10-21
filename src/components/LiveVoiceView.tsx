@@ -12,6 +12,7 @@ import {
   RefreshCw,
   MessageSquare
 } from 'lucide-react';
+import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai';
 import { GaplessPCMPlayer, floatTo16BitPCMBase64, playWavBase64 } from '../utils/audioUtils';
 import { INITIAL_GREETING, GREN_PROFILE } from '../data/grenResumeData';
 
@@ -36,8 +37,8 @@ export const LiveVoiceView: React.FC<LiveVoiceViewProps> = ({
   ]);
   const [audioLevel, setAudioLevel] = useState<number>(0);
 
-  // References for WebSocket, AudioContext, Stream, and Player
-  const wsRef = useRef<WebSocket | null>(null);
+  // References for Live session, AudioContext, Stream, and Player
+  const sessionRef = useRef<Session | null>(null);
   const pcmPlayerRef = useRef<GaplessPCMPlayer | null>(null);
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -79,13 +80,13 @@ export const LiveVoiceView: React.FC<LiveVoiceViewProps> = ({
       }
       inputAudioCtxRef.current = null;
     }
-    if (wsRef.current) {
+    if (sessionRef.current) {
       try {
-        wsRef.current.close();
+        sessionRef.current.close();
       } catch {
         // ignore
       }
-      wsRef.current = null;
+      sessionRef.current = null;
     }
     if (pcmPlayerRef.current) {
       pcmPlayerRef.current.stop();
@@ -144,66 +145,62 @@ export const LiveVoiceView: React.FC<LiveVoiceViewProps> = ({
       };
       updateVisualizer();
 
-      // 3. Connect WebSocket to server /live-ws
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/live-ws`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+      // 3. Get a short-lived token from our API, then open the Live session directly
+      const tokenRes = await fetch('/api/live-token', { method: 'POST' });
+      if (!tokenRes.ok) {
+        const body = await tokenRes.json().catch(() => ({}));
+        throw new Error(body.error || `Token request failed (${tokenRes.status})`);
+      }
+      const { token, model } = await tokenRes.json();
 
-      ws.onopen = () => {
-        console.log('WebSocket connected to /live-ws');
-        setConnectionStatus('connected');
-        setIsVoiceActive(true);
-
-        // Send initial greeting trigger to the model if desired or speak greeting
-        // We can also play the initial greeting via TTS to welcome the user
-        speakGreetingAloud();
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'ready') {
+      const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: 'v1alpha' } });
+      let open = false;
+      const session = await ai.live.connect({
+        model,
+        callbacks: {
+          onopen: () => {
+            open = true;
             setConnectionStatus('listening');
-          } else if (msg.type === 'audio' && msg.audio) {
-            setConnectionStatus('speaking');
-            pcmPlayerRef.current?.playChunk(msg.audio);
-          } else if (msg.type === 'interrupted') {
-            pcmPlayerRef.current?.stop();
-            setConnectionStatus('listening');
-          } else if (msg.type === 'turnComplete') {
-            setConnectionStatus('listening');
-          } else if (msg.type === 'error') {
-            console.error('Live API server error:', msg.message);
-            setErrorMessage(msg.message || 'Error occurred with Gemini Live API');
-          }
-        } catch (e) {
-          console.error('Failed to parse WebSocket message:', e);
-        }
-      };
-
-      ws.onerror = (e) => {
-        console.error('WebSocket error:', e);
-        setErrorMessage('WebSocket connection failed. Falling back to Assisted Voice.');
-        setConnectionStatus('error');
-      };
-
-      ws.onclose = () => {
-        console.log('WebSocket closed');
-        if (connectionStatus !== 'error') {
-          setConnectionStatus('idle');
-          setIsVoiceActive(false);
-        }
-      };
+            setIsVoiceActive(true);
+            speakGreetingAloud();
+          },
+          onmessage: (message: LiveServerMessage) => {
+            const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (audio) {
+              setConnectionStatus('speaking');
+              pcmPlayerRef.current?.playChunk(audio);
+            }
+            if (message.serverContent?.interrupted) {
+              pcmPlayerRef.current?.stop();
+              setConnectionStatus('listening');
+            }
+            if (message.serverContent?.turnComplete) {
+              setConnectionStatus('listening');
+            }
+          },
+          onerror: (e: ErrorEvent) => {
+            console.error('Gemini Live API error:', e);
+            setErrorMessage(e.message || 'Error occurred with Gemini Live API');
+            setConnectionStatus('error');
+          },
+          onclose: () => {
+            if (open) {
+              open = false;
+              setConnectionStatus((s) => (s === 'error' ? s : 'idle'));
+              setIsVoiceActive(false);
+            }
+          },
+        },
+      });
+      sessionRef.current = session;
 
       // 4. Capture audio and send to Live API
       processor.onaudioprocess = (e) => {
-        if (isMutedRef.current) return;
-        if (ws.readyState !== WebSocket.OPEN) return;
+        if (isMutedRef.current || !open) return;
 
         const inputBuffer = e.inputBuffer.getChannelData(0);
         const base64PCM = floatTo16BitPCMBase64(inputBuffer);
-        ws.send(JSON.stringify({ type: 'audio', audio: base64PCM }));
+        session.sendRealtimeInput({ audio: { data: base64PCM, mimeType: 'audio/pcm;rate=16000' } });
       };
 
       source.connect(processor);
@@ -407,8 +404,8 @@ export const LiveVoiceView: React.FC<LiveVoiceViewProps> = ({
               key={idx}
               onClick={() => {
                 if (connectionStatus === 'connected' || connectionStatus === 'listening') {
-                  // If connected, send text over live WebSocket
-                  wsRef.current?.send(JSON.stringify({ type: 'text', text: q }));
+                  // If connected, send text over the live session
+                  sessionRef.current?.sendRealtimeInput({ text: q });
                 } else {
                   onSwitchToChat(q);
                 }
