@@ -1,0 +1,10 @@
+{
+  "name": "Joel - AI Representative for Gren",
+  "description": "Joel is the intelligent, professional AI representative for Gren, answering questions about his skills, performance under pressure, work ethic, and qualifications based on his perception audit and CV.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
